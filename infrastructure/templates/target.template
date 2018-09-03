@@ -1,0 +1,360 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "CloudFormation Template to provision a target environment for the rails sample app",
+
+  "Parameters" : {
+
+    "KeyName" : {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type" : "String",
+      "Default" : "ditc",
+      "MinLength": "1",
+      "MaxLength": "64",
+      "AllowedPattern" : "[-_ a-zA-Z0-9]*",
+      "ConstraintDescription" : "can contain only alphanumeric characters, spaces, dashes and underscores."
+    },
+
+    "InstanceType" : {
+      "Description" : "EC2 instance type",
+      "Type" : "String",
+      "Default" : "t2.medium",
+      "ConstraintDescription" : "must be a valid EC2 instance type."
+    },
+
+	"EnvironmentType" : {
+	  "Description" : "Mode for rails to run in",
+	  "Type" : "String",
+	  "Default" : "development"
+	},
+
+	"PrivateBucket" : {
+      "Description" : "S3 bucket for storing credentials",
+      "Type" : "String",
+      "Default" : "stelligentlabs-private",
+      "ConstraintDescription" : "Must be a valid S3 Bucket"
+    },
+
+	"PublicBucket" : {
+	  "Description" : "S3 bucket for storing build artifacts",
+      "Type" : "String",
+      "Default" : "stelligentlabs",
+      "ConstraintDescription" : "Must be a valid S3 Bucket"
+	}
+  },
+
+  "Mappings" : {
+    "AWSInstanceType2Arch" : {
+      "t2.micro"    : { "Arch" : "64" },
+      "t2.small"    : { "Arch" : "64" },
+      "t2.medium"   : { "Arch" : "64" },
+      "m3.medium"   : { "Arch" : "64" },
+      "m3.large"    : { "Arch" : "64" },
+      "m3.xlarge"   : { "Arch" : "64" },
+      "m3.2xlarge"  : { "Arch" : "64" },
+      "c4.large"    : { "Arch" : "64" },
+      "c4.xlarge"   : { "Arch" : "64" }
+    },
+    "AWSRegionArch2AMI" : {
+      "us-east-1"      : { "32" : "ami-7f418316", "64" : "ami-1ecae776" },
+      "us-west-1"      : { "32" : "ami-951945d0", "64" : "ami-d114f295" },
+      "us-west-2"      : { "32" : "ami-16fd7026", "64" : "ami-e7527ed7" },
+      "eu-central-1"   : { "32" : "ami-dcfa4edd", "64" : "ami-a8221fb5" },
+      "eu-west-1"      : { "32" : "ami-24506250", "64" : "ami-a10897d6" },
+      "ap-southeast-1" : { "32" : "ami-74dda626", "64" : "ami-68d8e93a" },
+      "ap-southeast-2" : { "32" : "ami-74dda626", "64" : "ami-fd9cecc7" },
+      "ap-northeast-1" : { "32" : "ami-dcfa4edd", "64" : "ami-cbf90ecb" },
+      "sa-east-1"      : { "32" : "ami-dcfa4edd", "64" : "ami-b52890a8" }
+    }
+  },
+
+  "Resources" : {
+
+    "CfnUser" : {
+      "Type" : "AWS::IAM::User",
+      "Properties" : {
+        "Path": "/",
+        "Policies": [{
+          "PolicyName": "root",
+          "PolicyDocument": { "Statement":[{
+            "Effect":"Allow",
+            "Action":"*",
+            "Resource":"*"
+          }
+        ]}
+       }]
+      }
+    },
+
+	"PrivateBucketPolicy" : {
+      "Type" : "AWS::S3::BucketPolicy",
+      "Properties" : {
+        "PolicyDocument": {
+          "Id":"PrivateBucketPolicy",
+          "Statement":[
+ 		    {
+              "Sid":"ReadAccess",
+	          "Action":["s3:GetObject"],
+	          "Effect":"Allow",
+	          "Resource": { "Fn::Join" : ["", ["arn:aws:s3:::", { "Ref" : "PrivateBucket" } , "/*" ]]},
+	          "Principal":{ "AWS": { "Fn::GetAtt" : [ "CfnUser", "Arn" ]} }
+            }
+		  ]
+        },
+        "Bucket" : {"Ref" : "PrivateBucket"}
+      }
+    },
+
+    "HostKeys" : {
+      "Type" : "AWS::IAM::AccessKey",
+      "Properties" : {
+        "UserName" : { "Ref": "CfnUser" }
+      }
+    },
+
+    "WebServer": {
+      "Type": "AWS::EC2::Instance",
+ 	  "DependsOn" : [ "PrivateBucketPolicy", "GatewayToInternet" ],
+	  "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+            "packages" : {
+              "yum" : {
+                "puppet3"   : []
+              }
+            },
+
+			"sources" : {
+				"/home/ec2-user/" : { "Fn::Join" : ["", ["https://s3.amazonaws.com/stelligentlabs/puppet.tar.gz"]]}
+			},
+
+			"files" : {
+			  "/home/ec2-user/id_rsa.pub" : {
+			   "source" : { "Fn::Join" : ["", ["https://s3.amazonaws.com/", { "Ref" : "PrivateBucket" }, "/id_rsa.pub"]]},
+               "mode"   : "000500",
+               "owner"  : "root",
+               "group"  : "root",
+			   "authentication" : "S3AccessCreds"
+              },
+			  "/home/ec2-user/nodes.pp" : {
+                "content" : { "Fn::Join" : ["", [
+				  "node default {\n",
+					"include system\n",
+				    "include bundler\n",
+				    "include passenger\n",
+				    "include sqlite\n",
+				    "include git\n",
+					"include httpd\n",
+				  "}"
+                  ]]},
+                "mode"   : "000500",
+                "owner"  : "root",
+                "group"  : "root"
+              },
+
+			  "/etc/httpd/conf/virtualhosts" : {
+	            "content" : { "Fn::Join" : ["", [
+	              "<VirtualHost ", { "Ref" : "IPAddress" }, ":80>\n",
+				  "RailsEnv ", {"Ref" : "EnvironmentType"}, "\n",
+				  "DocumentRoot /var/www/rails/public\n",
+				  "<Directory /var/www/rails/public>\n",
+				     "AllowOverride all\n",
+				     "Options -MultiViews\n",
+				  "</Directory>\n",
+	              "</VirtualHost>\n"
+	            ]]},
+	                "mode"   : "000500",
+	                "owner"  : "root",
+	                "group"  : "root"
+	          },
+			  "/etc/httpd/conf/passenger" : {
+	            "content" : { "Fn::Join" : ["", [
+	              "LoadModule passenger_module /usr/local/share/ruby/gems/2.0/gems/passenger-5.0.7/buildout/apache2/mod_passenger.so\n",
+	              "PassengerRoot /usr/local/share/ruby/gems/2.0/gems/passenger-5.0.7\n",
+	              "PassengerRuby /usr/bin/ruby2.0\n"
+	            ]]},
+	                "mode"   : "000500",
+	                "owner"  : "root",
+	                "group"  : "root"
+	          }
+			}
+          }
+        },
+
+		"AWS::CloudFormation::Authentication" : {
+		  "S3AccessCreds" : {
+		    "type" : "S3",
+		    "accessKeyId" : { "Ref" : "HostKeys" },
+		    "secretKey" : {"Fn::GetAtt": ["HostKeys", "SecretAccessKey"]},
+		    "buckets" : [ { "Ref" : "PrivateBucket" }, { "Ref" : "PublicBucket"} ]
+		  }
+		}
+      },
+      "Properties": {
+        "ImageId"           : { "Fn::FindInMap" : [ "AWSRegionArch2AMI", { "Ref" : "AWS::Region" },
+                              { "Fn::FindInMap" : [ "AWSInstanceType2Arch", { "Ref" : "InstanceType" }, "Arch" ] } ] },
+        "KeyName"           : { "Ref" : "KeyName" },
+		"Tags" : [{ "Key"   : "Name", "Value" : "Target Environment" }],
+        "InstanceType"      : { "Ref" : "InstanceType" },
+        "NetworkInterfaces" : [ { "NetworkInterfaceId" : { "Ref" : "mainXface" },
+                                  "DeviceIndex" : "0"
+                             } ],
+		"UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+		  "#!/bin/bash -v\n",
+		  "date > /home/ec2-user/starttime\n",
+          "yum update -y aws-cfn-bootstrap\n",
+
+          "# Install packages\n",
+          "/opt/aws/bin/cfn-init -s ", { "Ref" : "AWS::StackName" }, " -r WebServer ",
+          "    --access-key ",  { "Ref" : "HostKeys" },
+          "    --secret-key ", {"Fn::GetAtt": ["HostKeys", "SecretAccessKey"]},
+          "    --region ", { "Ref" : "AWS::Region" }, " || error_exit 'Failed to run cfn-init'\n",
+
+		  "# Build environment using Puppet\n",
+          "puppet apply --modulepath=/home/ec2-user/modules /home/ec2-user/nodes.pp\n",
+
+		  "# Add in virtual hosts config\n",
+		  "cat /etc/httpd/conf/passenger >> /etc/httpd/conf/httpd.conf\n",
+		  "cat /etc/httpd/conf/virtualhosts >> /etc/httpd/conf/httpd.conf\n",
+
+		  "# Add Public key for passwordless authentication from Jenkins Instance\n",
+		  "cat /home/ec2-user/id_rsa.pub >> /home/ec2-user/.ssh/authorized_keys\n",
+
+		  "# Disable tty for ec2-user\n",
+		  "echo \"Defaults:%ec2-user !requiretty\" >> /etc/sudoers\n",
+		  "echo \"Defaults:ec2-user !requiretty\" >> /etc/sudoers\n",
+
+		  "/opt/aws/bin/cfn-signal", " -e 0", " '", { "Ref" : "WaitHandle" }, "'","\n",
+
+		  "date > /home/ec2-user/stoptime"
+		]]}}
+      }
+    },
+
+    "IPAddress" : {
+      "Type" : "AWS::EC2::EIP",
+      "Properties" : { "Domain" : "vpc" }
+    },
+
+    "IPAssoc" : {
+      "Type" : "AWS::EC2::EIPAssociation",
+      "Properties" : {
+        "AllocationId" : { "Fn::GetAtt" : [ "IPAddress" , "AllocationId" ] },
+        "NetworkInterfaceId" : { "Ref" : "mainXface" }
+       }
+    },
+
+    "mainXface" : {                                                             
+        "Type" : "AWS::EC2::NetworkInterface",                                  
+        "Properties" : {                                                        
+                "GroupSet"                 : [ { "Ref" : "FrontendGroup" } ],   
+                "SubnetId"                 : { "Ref" : "PublicSubnet" },        
+                "Description"              : "ditc-target-app-interface",          
+                "SourceDestCheck"          : "true"                             
+        }                                                                       
+    },        
+
+    "FrontendGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "VpcId" : { "Ref" : "VPC" },
+        "GroupDescription" : "Enable SSH and access to Apache",
+        "SecurityGroupIngress" : [
+          {"IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : "0.0.0.0/0" },
+          {"IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "CidrIp" : "0.0.0.0/0" }
+        ]
+      }
+    },
+
+    "VPC" : {
+        "Type" : "AWS::EC2::VPC",
+        "Properties" : {
+            "EnableDnsSupport"      : "True",
+            "EnableDnsHostnames"    : "True",
+            "CidrBlock"             : "10.50.50.0/16",
+            "Tags" : [
+                { "Key" : "Application", "Value" : { "Ref" : "AWS::StackName" } },
+                { "Key" : "Network", "Value" : "Public" }
+            ]
+        }
+    },
+
+    "PublicSubnet" : {
+        "Type" : "AWS::EC2::Subnet",
+        "Properties" : {
+            "VpcId"     : { "Ref" : "VPC" },
+            "CidrBlock" : "10.50.50.0/24",
+            "Tags" : [
+                { "Key" : "Application" , "Value" : { "Ref" : "AWS::StackName" } },
+                { "Key" : "Netowrk", "Value" : "Public" }
+            ]
+        }
+    },
+
+    "InternetGateway" : {
+        "Type" : "AWS::EC2::InternetGateway"
+    },
+
+    "GatewayToInternet" : {
+        "Type" : "AWS::EC2::VPCGatewayAttachment",
+        "Properties" : {
+            "VpcId" : { "Ref" : "VPC" },
+            "InternetGatewayId" : { "Ref" : "InternetGateway" }
+        }
+    },
+
+    "PublicRouteTable" : {
+        "Type" : "AWS::EC2::RouteTable",
+        "Properties" : {
+            "VpcId" : { "Ref" : "VPC" }
+        }
+    },
+
+    "PublicRoute" : {
+        "Type" : "AWS::EC2::Route",
+        "DependsOn" : "GatewayToInternet",
+        "Properties" : {
+            "RouteTableId" : { "Ref" : "PublicRouteTable" },
+            "DestinationCidrBlock" : "0.0.0.0/0",
+            "GatewayId" : { "Ref" : "InternetGateway" }
+        }
+    },
+
+    "PublicSubnetRouteTableAssociation" : {
+        "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+        "Properties" : {
+            "SubnetId" : { "Ref" : "PublicSubnet" },
+            "RouteTableId" : { "Ref" : "PublicRouteTable" }
+        }
+    },
+
+	"WaitHandle" : {
+      "Type" : "AWS::CloudFormation::WaitConditionHandle"
+    },
+
+    "WaitCondition" : {
+      "Type" : "AWS::CloudFormation::WaitCondition",
+      "DependsOn" : "WebServer",
+      "Properties" : {
+        "Handle" : { "Ref" : "WaitHandle" },
+        "Timeout" : "1200"
+      }
+    }
+  },
+
+  "Outputs" : {
+    "InstanceIPAddress" : {
+      "Value" : { "Ref" : "IPAddress" }
+    },
+	"StackName" : {
+      "Value" : { "Ref" : "AWS::StackName" }
+    },
+    "ArtifactBucket" : {
+      "Value" : { "Ref" : "PublicBucket" }
+    },
+	"SampleApp" : {
+      "Value" : { "Fn::Join" : ["", ["http://", { "Fn::GetAtt" : [ "WebServer", "PublicDnsName" ] }, "/"]] },
+      "Description" : "URL for newly created Sample App"
+    }
+  }
+}
